@@ -321,11 +321,27 @@ function createDecryptStream(cdnUrl, baseCtr, sched, offset, end, opts) {
   var stallMs = typeof opts.stallMs === 'number' && opts.stallMs >= 0 ? opts.stallMs : 15000;
   var backoffStart = typeof opts.backoffStart === 'number' && opts.backoffStart >= 0 ? opts.backoffStart : 1000;
   var maxBackoff = typeof opts.maxBackoff === 'number' && opts.maxBackoff > 0 ? opts.maxBackoff : 15000;
+  // goja ↔ Go 的 blob 流每次 enqueue 都有跨语言开销; 小块直喂会把吞吐压到 ~100KB/s。
+  // 攒够 1MiB 再 enqueue, 大幅减少跨层次数。
+  var batchBytes = typeof opts.batchBytes === 'number' && opts.batchBytes > 0 ? opts.batchBytes : 1024 * 1024;
   var stopped = false;
   return new ReadableStream({
     async start(controller) {
       var abs = offset || 0;
       var backoff = backoffStart;
+      var pending = [], pendingLen = 0;
+      function flush() {
+        if (!pendingLen) return;
+        var out;
+        if (pending.length === 1) out = pending[0];
+        else {
+          out = new Uint8Array(pendingLen);
+          var off = 0;
+          for (var i = 0; i < pending.length; i++) { out.set(pending[i], off); off += pending[i].length; }
+        }
+        pending = []; pendingLen = 0;
+        controller.enqueue(out);
+      }
       while (!stopped) {
         var resp = null, reader = null, failed = null;
         try {
@@ -337,16 +353,19 @@ function createDecryptStream(cdnUrl, baseCtr, sched, offset, end, opts) {
             if (sr.stalled) { failed = new Error('CDN 断流 (offset=' + abs + ')'); break; }
             if (sr.error) { failed = sr.error; break; }
             var r = sr.r;
-            if (r.done) { controller.close(); return; }
+            if (r.done) { flush(); controller.close(); return; }
             var v = r.value;
             if (!v || !v.length) continue;
             var plain = decryptRange(v, abs, baseCtr, sched);
             abs += v.length;
-            controller.enqueue(plain);
+            pending.push(plain);
+            pendingLen += plain.length;
+            if (pendingLen >= batchBytes) flush();
           }
         } catch (e) { failed = e; }
         if (reader) { try { reader.cancel(); } catch (e) {} }
         if (stopped) return;
+        flush();
         await sleepMs(backoff);
         backoff = Math.min(maxBackoff, backoff * 2);
       }
