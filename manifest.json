@@ -2,12 +2,12 @@
   "name": "yifile-local-decrypt",
   "author": "yal52810",
   "title": "YIFile 本地解密下载",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "homepage": "https://github.com/yal52810/gopeed-yifile",
   "repository": {
     "url": "https://github.com/yal52810/gopeed-yifile"
   },
-  "description": "YIFile 加密下载: 单连接 + 1MiB 批量喂流(规避多连接限速与 goja 跨语言开销) + 本地 AES-CTR 解密 + 断流15s自动重连续传; 支持 vip6 客户端链路(ua=okhttp)",
+  "description": "YIFile 加密下载: 单连接 + 1MiB 批量喂流 + 单定时器看门狗(规避 goja per-read 定时器开销) + 本地 AES-CTR 解密 + 断流自动重连续传; 支持 vip6 客户端链路(ua=okhttp)",
   "scripts": [
     {
       "event": "onResolve",

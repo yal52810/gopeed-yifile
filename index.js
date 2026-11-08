@@ -301,6 +301,8 @@ function sleepMs(ms) {
 }
 
 // read() + 无数据超时: 超时返回 {stalled:true}, 不等待底层 fetch 自行断开。
+// 注意: 该实现每次 read 新建一个 setTimeout; 在 goja 里高频调用会严重拖慢吞吐,
+// 主下载流改用 createStallReader(单个看门狗定时器)。
 function readWithStall(reader, ms) {
   return new Promise(function (resolve) {
     var timer = setTimeout(function () { resolve({ stalled: true }); }, ms);
@@ -309,6 +311,47 @@ function readWithStall(reader, ms) {
       function (e) { clearTimeout(timer); resolve({ stalled: false, error: e }); }
     );
   });
+}
+
+// 单定时器看门狗版 read: 整个连接只保留一个递归 setTimeout,
+// 解决 goja 下 per-read 定时器创建开销把吞吐压到 ~100KB/s 的问题。
+function createStallReader(reader, stallMs, checkMs) {
+  checkMs = typeof checkMs === 'number' && checkMs > 0 ? checkMs : 1000;
+  var lastAt = Date.now();
+  var waiting = null;
+  var stopped = false;
+  var timer = null;
+  function tick() {
+    if (stopped) return;
+    if (waiting && Date.now() - lastAt > stallMs) {
+      var w = waiting;
+      waiting = null;
+      w({ stalled: true });
+    }
+    timer = setTimeout(tick, checkMs);
+    if (timer && timer.unref) timer.unref();
+  }
+  timer = setTimeout(tick, checkMs);
+  if (timer && timer.unref) timer.unref();
+  return {
+    read: function () {
+      if (stopped) return Promise.resolve({ stalled: true });
+      lastAt = Date.now();
+      return new Promise(function (resolve) {
+        var done = false;
+        waiting = function (v) { if (done) return; done = true; resolve(v); };
+        reader.read().then(
+          function (r) { if (done) return; done = true; waiting = null; resolve({ stalled: false, r: r }); },
+          function (e) { if (done) return; done = true; waiting = null; resolve({ stalled: false, error: e }); }
+        );
+      });
+    },
+    stop: function () {
+      stopped = true;
+      waiting = null;
+      if (timer) { try { clearTimeout(timer); } catch (e) {} timer = null; }
+    }
+  };
 }
 
 // 断流自愈下载流:
@@ -324,6 +367,7 @@ function createDecryptStream(cdnUrl, baseCtr, sched, offset, end, opts) {
   // goja ↔ Go 的 blob 流每次 enqueue 都有跨语言开销; 小块直喂会把吞吐压到 ~100KB/s。
   // 攒够 1MiB 再 enqueue, 大幅减少跨层次数。
   var batchBytes = typeof opts.batchBytes === 'number' && opts.batchBytes > 0 ? opts.batchBytes : 1024 * 1024;
+  var stallCheckMs = typeof opts.stallCheckMs === 'number' && opts.stallCheckMs > 0 ? opts.stallCheckMs : 1000;
   var stopped = false;
   return new ReadableStream({
     async start(controller) {
@@ -343,17 +387,18 @@ function createDecryptStream(cdnUrl, baseCtr, sched, offset, end, opts) {
         controller.enqueue(out);
       }
       while (!stopped) {
-        var resp = null, reader = null, failed = null;
+        var resp = null, reader = null, stallReader = null, failed = null;
         try {
           resp = await fetch(cdnUrl, { headers: mergeHeaders(mode, { Range: 'bytes=' + abs + '-' + (end >= 0 ? end : '') }) });
           if (!resp.ok) throw new Error('CDN HTTP ' + resp.status + ' (offset=' + abs + ')');
           reader = resp.body.getReader();
+          stallReader = createStallReader(reader, stallMs, stallCheckMs);
           while (!stopped) {
-            var sr = await readWithStall(reader, stallMs);
+            var sr = await stallReader.read();
             if (sr.stalled) { failed = new Error('CDN 断流 (offset=' + abs + ')'); break; }
             if (sr.error) { failed = sr.error; break; }
             var r = sr.r;
-            if (r.done) { flush(); controller.close(); return; }
+            if (r.done) { if (stallReader) stallReader.stop(); flush(); controller.close(); return; }
             var v = r.value;
             if (!v || !v.length) continue;
             var plain = decryptRange(v, abs, baseCtr, sched);
@@ -363,6 +408,7 @@ function createDecryptStream(cdnUrl, baseCtr, sched, offset, end, opts) {
             if (pendingLen >= batchBytes) flush();
           }
         } catch (e) { failed = e; }
+        if (stallReader) { try { stallReader.stop(); } catch (e) {} }
         if (reader) { try { reader.cancel(); } catch (e) {} }
         if (stopped) return;
         flush();
@@ -435,6 +481,7 @@ if (typeof module !== 'undefined' && module.exports) {
     createDecryptStream: createDecryptStream,
     probeSize: probeSize,
     readWithStall: readWithStall,
+    createStallReader: createStallReader,
     sleepMs: sleepMs,
     baseHeaders: baseHeaders,
     WEB_UA: WEB_UA,
