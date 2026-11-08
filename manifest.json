@@ -1,0 +1,19 @@
+{
+  "name": "yifile-local-decrypt",
+  "title": "YIFile 本地解密下载",
+  "version": "0.2.0",
+  "description": "YIFile 加密下载: Gopeed 直连 CDN 拉密文并本地 AES-CTR 解密; 断流15s自动重连续传, 支持 vip6 客户端链路(ua=okhttp)(手机/桌面通用, 服务器零流量)",
+  "scripts": [
+    {
+      "event": "onResolve",
+      "match": {
+        "urls": [
+          "*://www.yifile.com/down.html*",
+          "*://yifile.com/down.html*",
+          "*://*.yifile.com/down.html*"
+        ]
+      },
+      "entry": "index.js"
+    }
+  ]
+}
