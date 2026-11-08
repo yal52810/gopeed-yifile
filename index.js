@@ -378,14 +378,18 @@ if (typeof gopeed !== 'undefined' && gopeed && gopeed.events && gopeed.events.on
       var size = await probeSize(cdnUrl, streamOpts);
       if (!size) throw new Error('无法获取 YIFile CDN 文件大小, 链接可能已过期');
 
+      // 单连接交付: vip6 CDN 对同一链的多 Range 并发会限速(实测 2 并发单流仅 ~50KB/s),
+      // 因此不让 Gopeed 分段多连接, 由扩展内部单流下载 + 断流自愈续传。
+      var SINGLE_CONNECTION = true;
+
       var blobUrl = gopeed.runtime.blob.createObjectURL(async function (opts) {
         var o = opts || {};
         return createDecryptStream(cdnUrl, baseCtr, sched, o.offset || 0, typeof o.end === 'number' ? o.end : -1, streamOpts);
-      }, { size: size, range: true });
+      }, { size: size, range: !SINGLE_CONNECTION });
 
       ctx.res = {
         name: name,
-        range: true,
+        range: !SINGLE_CONNECTION,
         files: [
           { name: name, size: size, req: { url: blobUrl } }
         ]
